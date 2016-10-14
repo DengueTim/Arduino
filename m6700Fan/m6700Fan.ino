@@ -18,36 +18,47 @@
 #define TACK_PASS_THROUGH     -1
 #define TACK_STOP             0
 
-volatile int fanTackCount = 0;
+#define TACK_MIN_25K          93
+#define TACK_MAX_25K          375
 
-volatile int ecTackOutInterval = TACK_PASS_THROUGH;
+#define PWM_MAX               1024
+#define PWM_MIN_CUTOFF        256
+
+#define ANALOG_MAX            1024
+
+volatile uint16_t fanTackCount = 0;
+
+// Desired time between transitions of tack to EC in 25,0000th of a second.
+// Working values are 93(~4000rpm 100%) to 375(~1000rpm 25%)
+// 0 Stopped
+// -1 copy tack value from real fan every millisecond  
+volatile uint16_t ecTackOutInterval = TACK_PASS_THROUGH;
 
 volatile bool doEverySecond = false;
 volatile bool doEcTackOutToggle = false;
 
 void everySecond() {
-  static int seconds = 0;
-  static int fanRpm = 0;
-  seconds++;
+  static uint16_t fanRpm = 0;
+  
   // Compute fanRpm
   fanRpm = fanTackCount * (60 / 4); // Two ticks per rev. Two changes per tick
   fanTackCount = 0;
 
   // Read EC PWM
-  int ecPwm = analogRead(FROM_EC_PWM_ADC_PIN);
-  if (ecPwm < 256) {
+  uint16_t ecPwm = analogRead(FROM_EC_PWM_ADC_PIN);
+  if (ecPwm < PWM_MIN_CUTOFF) {
     ecPwm = 0;
-  } else if (ecPwm > (1024 - 64)) {
-    ecPwm = 1024;
+  } else if (ecPwm > (ANALOG_MAX - 64)) {
+    ecPwm = PWM_MAX;
   }
   Serial.print("EC PWM:");
   Serial.println(ecPwm, DEC);
   
   // Read temp.
   digitalWrite(THERM_ENABLE_PIN, 1);
-  int thermRaw = analogRead(THERM_IN_PIN);
+  uint16_t thermRaw = analogRead(THERM_IN_PIN);
   digitalWrite(THERM_ENABLE_PIN, 0);
-  float thermKohms = (THERM_R_KOHMS * thermRaw) / (1024 - thermRaw); // Rt / (R + Rt)
+  float thermKohms = (THERM_R_KOHMS * thermRaw) / (ANALOG_MAX - thermRaw); // Rt / (R + Rt)
     /* Thermister ln curve from
    *  Kohms   temp C
    *  20      0
@@ -60,12 +71,18 @@ void everySecond() {
   Serial.println(thermC, 3);
 
   // Calculate the required fan PWM duty(0-1024) given thermC
-  int thermRequiredPwm = 0;
+  uint16_t thermRequiredPwm = 0;
+  
 
   if (thermRequiredPwm > ecPwm) {
     // Set fan speed from thermRequiredPwm and send fake tack values to EC
-    
-    ecTackOutInterval = 
+    Timer1.pwm(TO_FAN_PWM_PIN, thermRequiredPwm);
+    if (ecPwm == 0) {
+      ecTackOutInterval = 0;
+    } else {
+      const uint32_t C = 24094; // ((1 / 2.72) << 16)
+      ecTackOutInterval = TACK_MIN_25K + (uint16_t)(((PWM_MAX - ecPwm) * C) >> 16);     
+    }
   } else {
     // Set fan speed from ecPwm and send tack from fan to EC.
     Timer1.pwm(TO_FAN_PWM_PIN, ecPwm);
@@ -75,9 +92,9 @@ void everySecond() {
 
 void timer25kHz() {
   // Counts from 0 to 24999
-  static int timer25kHzCounter = 0;
+  static uint16_t timer25kHzCounter = 0;
   // Counts from 0 to ecTackOutInterval
-  static int ecTackOutCounter = 0;
+  static uint16_t ecTackOutCounter = 0;
 
   timer25kHzCounter++;
   if (timer25kHzCounter >= 25000) {
