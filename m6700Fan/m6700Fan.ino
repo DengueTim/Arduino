@@ -13,6 +13,9 @@
 #define THERM_ENABLE_PIN      A0 // 14
 #define THERM_IN_PIN          A6
 
+#define LED_PIN               13
+#define SPARE_PWM_PIN         10
+
 #define THERM_R_KOHMS         4.7
 
 #define TACK_PASS_THROUGH     -1
@@ -26,7 +29,8 @@
 
 #define ANALOG_MAX            1024
 
-volatile uint16_t fanTackCount = 0;
+volatile bool fanUsPerRevValid = false;
+volatile uint32_t fanUsPerRev = UINT32_MAX; // Stopped
 
 // Desired time between transitions of tack to EC in 25,0000th of a second.
 // Working values are 93(~4000rpm 100%) to 375(~1000rpm 25%)
@@ -34,27 +38,28 @@ volatile uint16_t fanTackCount = 0;
 // -1 copy tack value from real fan every millisecond  
 volatile uint16_t ecTackOutInterval = TACK_PASS_THROUGH;
 
-volatile bool doEverySecond = false;
+volatile bool doEveryDecasecond = false;
 volatile bool doEcTackOutToggle = false;
 
-void everySecond() {
-  static uint16_t fanRpm = 0;
-  
-  // Compute fanRpm
-  fanRpm = fanTackCount * (60 / 4); // Two ticks per rev. Two changes per tick
-  fanTackCount = 0;
-
-  // Read EC PWM
-  uint16_t ecPwm = analogRead(FROM_EC_PWM_ADC_PIN);
-  if (ecPwm < PWM_MIN_CUTOFF) {
-    ecPwm = 0;
-  } else if (ecPwm > (ANALOG_MAX - 64)) {
-    ecPwm = PWM_MAX;
+void everyDecasecond() {
+  uint32_t localFanUsPerRev;
+  if (fanUsPerRevValid) {
+    fanUsPerRevValid = false;
+    localFanUsPerRev = fanUsPerRev;
+  } else {
+    // No tack transitions, assume stopped.
+    localFanUsPerRev = UINT32_MAX;
   }
-  Serial.print("EC PWM:");
-  Serial.println(ecPwm, DEC);
   
-  // Read temp.
+  // Read EC PWM
+  uint16_t rateFromEc = analogRead(FROM_EC_PWM_ADC_PIN);
+  if (rateFromEc < 256) {
+    rateFromEc = 0;
+  } else if (rateFromEc > (ANALOG_MAX - 32)) {
+    rateFromEc = PWM_MAX;
+  }
+
+  // Read temp ADC.
   digitalWrite(THERM_ENABLE_PIN, 1);
   uint16_t thermRaw = analogRead(THERM_IN_PIN);
   digitalWrite(THERM_ENABLE_PIN, 0);
@@ -67,27 +72,57 @@ void everySecond() {
    *  1.1    100
   */
   float thermC = 103.21 - 34.37 * (float)log(thermKohms);
-  Serial.print("thermC:");
-  Serial.println(thermC, 3);
 
-  // Calculate the required fan PWM duty(0-1024) given thermC
-  uint16_t thermRequiredPwm = 0;
-  
+  // Calulate rate from thermC. Linear. 40C -> 25%, 70C -> 100%
+  //uint16_t rateFromTherm = (uint16_t)(thermC * 25.6) - 768;
+  int16_t signedRateFromTherm = (int16_t)(thermC * 102.4) - 2560;
+  uint16_t rateFromTherm;
+  if (signedRateFromTherm < 256) {
+    rateFromTherm = 0;
+  } else if (signedRateFromTherm > 1024) {
+    rateFromTherm = 1024;
+  } else {
+    rateFromTherm = (uint16_t)signedRateFromTherm;
+  }
 
-  if (thermRequiredPwm > ecPwm) {
+  static bool thermOverride = false;
+  if (thermOverride) {
+    if (rateFromTherm == 0 || rateFromTherm < rateFromEc) {
+      thermOverride = false;
+    }
+  } else if (rateFromTherm >= 256) {
+    if (rateFromTherm > (rateFromEc + 50)) {
+      thermOverride = true;
+    }
+  }
+
+  if (thermOverride) {
     // Set fan speed from thermRequiredPwm and send fake tack values to EC
-    Timer1.pwm(TO_FAN_PWM_PIN, thermRequiredPwm);
-    if (ecPwm == 0) {
+    Timer1.pwm(TO_FAN_PWM_PIN, rateFromTherm);
+    if (rateFromEc == 0) {
       ecTackOutInterval = 0;
     } else {
       const uint32_t C = 24094; // ((1 / 2.72) << 16)
-      ecTackOutInterval = TACK_MIN_25K + (uint16_t)(((PWM_MAX - ecPwm) * C) >> 16);     
+      ecTackOutInterval = TACK_MIN_25K + (uint16_t)(((PWM_MAX - rateFromEc) * C) >> 16);     
     }
+    digitalWrite(LED_PIN, 1);
   } else {
     // Set fan speed from ecPwm and send tack from fan to EC.
-    Timer1.pwm(TO_FAN_PWM_PIN, ecPwm);
+    Timer1.pwm(TO_FAN_PWM_PIN, rateFromEc);
     ecTackOutInterval = TACK_PASS_THROUGH;
+    digitalWrite(LED_PIN, 0);
   }
+
+  Serial.print(rateFromEc, DEC);
+  Serial.print('\t');
+  Serial.print(thermC, 3);
+  Serial.print('\t');
+  Serial.print(rateFromTherm, DEC);
+  Serial.print('\t');
+  Serial.print(ecTackOutInterval, DEC);
+  Serial.print('\t');
+  Serial.print(localFanUsPerRev, DEC);
+  Serial.println();
 }
 
 void timer25kHz() {
@@ -97,15 +132,15 @@ void timer25kHz() {
   static uint16_t ecTackOutCounter = 0;
 
   timer25kHzCounter++;
-  if (timer25kHzCounter >= 25000) {
+  if (timer25kHzCounter >= 2500) {
     timer25kHzCounter = 0;
-    doEverySecond = true;
+    doEveryDecasecond = true;
   }
 
   if (ecTackOutInterval > 0) {
     ecTackOutCounter++;
-    if (ecTackOutCounter > ecTackOutInterval) {
-      ecTackOutCounter = 1;
+    if (ecTackOutCounter >= ecTackOutInterval) {
+      ecTackOutCounter = 0;
       doEcTackOutToggle = true;
     } 
   }
@@ -113,7 +148,15 @@ void timer25kHz() {
 
 // Will be called between 0 and 140 times a second.
 void fanTackPinIsr() {
-  fanTackCount++;
+  static uint32_t lastMicros = UINT32_MAX;
+  uint32_t currentMicros = micros();
+
+  if (currentMicros > lastMicros) {
+    fanUsPerRev = (currentMicros - lastMicros) << 2;
+    fanUsPerRevValid = true;  
+  }
+  lastMicros = currentMicros;
+  
   if (ecTackOutInterval == TACK_PASS_THROUGH) {
     doEcTackOutToggle = true;
   }
@@ -121,18 +164,16 @@ void fanTackPinIsr() {
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("4 Wire Fan Controller Hack v0.1");
+  Serial.println("M6700 4 Wire Fan Controller Hack v0.1");
   
   pinMode(FROM_FAN_TACK_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(FROM_FAN_TACK_PIN), fanTackPinIsr, CHANGE);
   
   pinMode(TO_FAN_PWM_PIN, OUTPUT);
   digitalWrite(TO_FAN_PWM_PIN, 0);
-  Timer1.initialize(40); // 25khz PWM for fan.
-  Timer1.pwm(TO_FAN_PWM_PIN, 0);
-  Timer1.attachInterrupt(timer25kHz);
 
-  pinMode(FROM_EC_PWM_PIN, INPUT_PULLUP);
+  pinMode(FROM_EC_PWM_PIN, INPUT);
+  //pinMode(FROM_EC_PWM_PIN, OUTPUT);
+  //digitalWrite(FROM_EC_PWM_PIN, 0);
   pinMode(FROM_EC_PWM_REF_PIN, OUTPUT);
   digitalWrite(FROM_EC_PWM_REF_PIN, 0);
   pinMode(FROM_EC_PWM_ADC_PIN, INPUT);
@@ -142,17 +183,32 @@ void setup() {
 
   pinMode(THERM_IN_PIN, INPUT);
   pinMode(THERM_ENABLE_PIN, OUTPUT);
+
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, 1);
+
+  Timer1.initialize(40); // 25khz PWM for fan.
+  Timer1.pwm(TO_FAN_PWM_PIN, 0);
+  Timer1.attachInterrupt(timer25kHz);
+
+  attachInterrupt(digitalPinToInterrupt(FROM_FAN_TACK_PIN), fanTackPinIsr, CHANGE);
 }
  
 void loop() {
   static bool ecTackOutValue = 0;
-  if (doEverySecond) {
-    doEverySecond = false;
-    everySecond();
+  if (doEveryDecasecond) {
+    doEveryDecasecond = false;
+    everyDecasecond();
   } else if (doEcTackOutToggle) {
     doEcTackOutToggle = false;
     ecTackOutValue = !ecTackOutValue;
     digitalWrite(TO_EC_TACK_PIN, ecTackOutValue);
+  } else if (Serial.available()) {
+    int c = Serial.read();
+    if (c >= '0' && c <= '8') {
+        int pwmDuty = (c - '0') * 128;
+        Timer1.pwm(SPARE_PWM_PIN, pwmDuty);
+    }
   } else {
     delay(1);
   }
