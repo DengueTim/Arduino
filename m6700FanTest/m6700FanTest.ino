@@ -9,16 +9,16 @@
 #define FAN_GPU_PWM_PIN       10
 #define FAN_GPU_TACK_PIN      3
 
-#define EC_CPU_PWM_GND_PIN    18 // A4
+#define EC_CPU_PWM_PIN        16 // A2
 #define EC_CPU_PWM_ADC_PIN    A5 // 19
-#define EC_CPU_TACK_PIN       15 // A1
+#define EC_CPU_TACK_PIN       17 // A3
 
-#define EC_GPU_PWM_GND_PIN    16 // A2
-#define EC_GPU_PWM_ADC_PIN    A3 // 17
+#define EC_GPU_PWM_PIN        15 // A1
+#define EC_GPU_PWM_ADC_PIN    A4 // 18
 #define EC_GPU_TACK_PIN       14 // A0
 
 #define THERM_ENABLE_PIN      11
-#define THERM_IN_PIN          A6
+#define THERM_ADC_PIN         A6
 #define THERM_R_KOHMS         4.7
 
 #define LED_PIN               13
@@ -33,10 +33,6 @@
 #define PWM_MIN_CUTOFF        256
 
 #define ANALOG_MAX            1024
-
-uint16_t adcPinValues[3] = { 0, 0, 0 };
-const uint8_t nextAdcPin[3] = { _BV(ADLAR) | 0b0001, _BV(ADLAR) | 0b0010, _BV(ADLAR) | 0b0011 };
-
 
 volatile bool fanCpuUsPerRevValid = false;
 volatile uint32_t fanCpuUsPerRev = UINT32_MAX; // Stopped
@@ -75,7 +71,7 @@ void everyDecasecond() {
 
   // Read temp ADC.
   digitalWrite(THERM_ENABLE_PIN, 1);
-  uint16_t thermRaw = analogRead(THERM_IN_PIN);
+  uint16_t thermRaw = analogRead(THERM_ADC_PIN);
   digitalWrite(THERM_ENABLE_PIN, 0);
   float thermKohms = (THERM_R_KOHMS * thermRaw) / (ANALOG_MAX - thermRaw); // Rt / (R + Rt)
     /* Thermister ln curve from
@@ -205,18 +201,16 @@ void setup() {
   digitalWrite(FAN_GPU_PWM_PIN, 0);
 
   pinMode(EC_CPU_PWM_ADC_PIN, INPUT);
-  pinMode(EC_CPU_PWM_GND_PIN, OUTPUT);
-  digitalWrite(EC_CPU_PWM_GND_PIN, 0);
+  pinMode(EC_CPU_PWM_PIN, INPUT);
   pinMode(EC_CPU_TACK_PIN, OUTPUT);
   digitalWrite(EC_CPU_TACK_PIN, 0);
 
   pinMode(EC_GPU_PWM_ADC_PIN, INPUT);
-  pinMode(EC_GPU_PWM_GND_PIN, OUTPUT);
-  digitalWrite(EC_GPU_PWM_GND_PIN, 0);
+  pinMode(EC_GPU_PWM_PIN, INPUT);
   pinMode(EC_GPU_TACK_PIN, OUTPUT);
   digitalWrite(EC_GPU_TACK_PIN, 0);
 
-  pinMode(THERM_IN_PIN, INPUT);
+  pinMode(THERM_ADC_PIN, INPUT);
   pinMode(THERM_ENABLE_PIN, OUTPUT);
 
   pinMode(LED_PIN, OUTPUT);
