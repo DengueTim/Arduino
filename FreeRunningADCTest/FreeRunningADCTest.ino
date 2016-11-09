@@ -1,30 +1,28 @@
 #include "avr/interrupt.h"
 
-uint16_t scount = 10;
-const uint8_t adcInputs[3] = { 0b0101, 0b0100, 0b0110 };
-uint16_t adcValues[3] = { 0, 0, 0 };
+volatile uint16_t adcEcGpuPwm = 0;
+volatile uint16_t adcEcCpuPwm = 0;
+volatile uint16_t adcTherm1 = 0;
 
 ISR(ADC_vect) {
-  uint16_t reading = ADCL | (ADCH << 8);
-
-  static uint8_t adcInputIndex = 255;
-  if (adcInputIndex == 255) {
-    // Ignore first read.
-    adcInputIndex = 0;
-    return;
-  }
-
-  // Read each pin 4 times. The impedance of the added components is to high.
-  if (adcInputIndex & 0b11 == 0b11) {
-    adcValues[adcInputIndex >> 2] = reading;
-  }
-  adcInputIndex++;
-  if (adcInputIndex >= (3 << 2)) {
-    adcInputIndex = 0;
-  }
-  ADMUX &= 0b11111000;
-  ADMUX |= adcInputs[adcInputIndex >> 2];
-  scount++;
+  uint8_t adcMux = ADMUX & 0b0111;
+  
+  switch(adcMux) {
+    case 0b0100:
+      adcEcGpuPwm = (ADCL | (ADCH << 8));
+      ADMUX = _BV(REFS0) | 0b0101;
+      break;
+    case 0b0101:
+      adcEcCpuPwm = (ADCL | (ADCH << 8));
+      ADMUX = _BV(REFS0) | 0b0110;
+      break;
+    case 0b0110:
+      adcTherm1 = (ADCL | (ADCH << 8));
+      ADMUX = _BV(REFS0) | 0b0100;
+      // Stop the ADC
+      ADCSRA &= ~_BV(ADEN);
+      break;
+   }
 }
 
 
@@ -35,17 +33,17 @@ void setup() {
   digitalWrite(11, 1);
   
   DIDR0 = 0b01110000;
-  ADMUX = _BV(REFS0) | adcInputs[0];
-  ADCSRA = _BV(ADEN) | _BV(ADSC) | _BV(ADATE) | _BV(ADIE) | _BV(ADPS0)| _BV(ADPS1) | _BV(ADPS2);
-  ADCSRB = 0; // free-running - all ADTS bits cleared
 }
 
 void loop() {
-  delay(500);
+  ADMUX = _BV(REFS0) | 0b0100;
+  ADCSRA = _BV(ADEN) | _BV(ADSC) | _BV(ADATE) | _BV(ADIE) | _BV(ADPS0)| _BV(ADPS1) | _BV(ADPS2);
+  ADCSRB = 0; // free-running - all ADTS bits cleared
+  
+  delay(1000);
 
-  // put your main code here, to run repeatedly:
-  Serial.println(scount);
-  Serial.println(adcValues[0]);
-  Serial.println(adcValues[1]);
-  Serial.println(adcValues[2]);
+  Serial.println(adcEcGpuPwm, DEC);
+  Serial.println(adcEcCpuPwm, DEC);
+  Serial.println(adcTherm1, DEC);
+  Serial.println();
 }  
