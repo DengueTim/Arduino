@@ -5,16 +5,16 @@ volatile uint16_t adcEcCpuPwm = 0;
 volatile uint16_t adcTherm1 = 0;
 
 ISR(ADC_vect) {
-  uint8_t adcMux = ADMUX & 0b0111;
-  
-  switch(adcMux) {
+  switch(ADMUX & 0b0111) {
     case 0b0100:
       adcEcGpuPwm = (ADCL | (ADCH << 8));
       ADMUX = _BV(REFS0) | 0b0101;
+      ADCSRA |= _BV(ADSC);
       break;
     case 0b0101:
       adcEcCpuPwm = (ADCL | (ADCH << 8));
       ADMUX = _BV(REFS0) | 0b0110;
+      ADCSRA |= _BV(ADSC);
       break;
     case 0b0110:
       adcTherm1 = (ADCL | (ADCH << 8));
@@ -37,8 +37,7 @@ void setup() {
 
 void loop() {
   ADMUX = _BV(REFS0) | 0b0100;
-  ADCSRA = _BV(ADEN) | _BV(ADSC) | _BV(ADATE) | _BV(ADIE) | _BV(ADPS0)| _BV(ADPS1) | _BV(ADPS2);
-  ADCSRB = 0; // free-running - all ADTS bits cleared
+  ADCSRA = _BV(ADEN) | _BV(ADSC) | _BV(ADIE) | _BV(ADPS0)| _BV(ADPS1) | _BV(ADPS2);
   
   delay(1000);
 

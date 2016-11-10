@@ -10,15 +10,15 @@
 #define FAN_GPU_TACK_PIN      3
 
 #define EC_CPU_PWM_PIN        16 // A2
-#define EC_CPU_PWM_ADC_INDEX  0 // A5 // 19
+#define EC_CPU_PWM_ADC        5 // A5 // 19
 #define EC_CPU_TACK_PIN       17 // A3
 
 #define EC_GPU_PWM_PIN        15 // A1
-#define EC_GPU_PWM_ADC_INDEX  1 // A4 // 18
+#define EC_GPU_PWM_ADC        4 // A4 // 18
 #define EC_GPU_TACK_PIN       14 // A0
 
 #define THERM_ENABLE_PIN      11
-#define THERM_ADC_INDEX       2 // A6
+#define THERM_ADC             6 // A6
 #define THERM_R_KOHMS         4.7
 
 #define LED_PIN               13
@@ -34,8 +34,9 @@
 
 #define ANALOG_MAX            1024
 
-uint16_t adcValues[3] = { 0, 0, 0 };
-const uint8_t nextAdc[4] = { _BV(ADLAR) | 0b0101, _BV(ADLAR) | 0b0100, _BV(ADLAR) | 0b0110 };
+volatile uint16_t adcEcGpuPwm = 0;
+volatile uint16_t adcEcCpuPwm = 0;
+volatile uint16_t adcTherm1 = 0;
 
 volatile bool fanCpuUsPerRevValid = false;
 volatile uint32_t fanCpuUsPerRev = UINT32_MAX; // Stopped
@@ -43,12 +44,12 @@ volatile uint32_t fanCpuUsPerRev = UINT32_MAX; // Stopped
 volatile bool fanGpuUsPerRevValid = false;
 volatile uint32_t fanGpuUsPerRev = UINT32_MAX; // Stopped
 
-// Desired time between transitions of tack to EC in 25,0000th of a second.
+// Desired time between transitions of tack to EC in 27,0000th of a second.
 // Working values are 93(~4000rpm 100%) to 375(~1000rpm 25%)
 // 0 Stopped
 // -1 copy tack value from real fan every millisecond  
-volatile uint16_t ecCpuTackOutInterval = TACK_PASS_THROUGH;
-volatile uint16_t ecGpuTackOutInterval = TACK_PASS_THROUGH;
+volatile uint16_t ecCpuTackInterval = TACK_PASS_THROUGH;
+volatile uint16_t ecGpuTackInterval = TACK_PASS_THROUGH;
 
 volatile bool doEveryDecasecond = false;
 volatile bool doEcCpuTackOutToggle = false;
@@ -138,20 +139,21 @@ void everyDecasecond() {
   Serial.println();
 }
 
-void timer25kHz() {
-  // Counts from 0 to 24999
-  static uint16_t timer25kHzCounter = 0;
-  // Counts from 0 to ecTackOutInterval
-  static uint16_t ecCpuTackOutCounter = 0;
-
-  timer25kHzCounter++;
-  if (timer25kHzCounter >= 2500) {
-    timer25kHzCounter = 0;
+void timer27kHz() {
+  // Counts from 0 to 26999
+  static uint16_t timer27kHzCounter = 0;
+  timer27kHzCounter++;
+  if (timer27kHzCounter >= 2700) {
+    timer27kHzCounter = 0;
     doEveryDecasecond = true;
   }
+  
+  // Counts from 0 to ecTackOutInterval
+  static uint16_t ecCpuTackCounter = 0;
+  static uint16_t ecGpuTackCounter = 0;
 
-  if (ecCpuTackOutInterval > 0) {
-    ecCpuTackOutCounter++;
+  if (ecCpuTackInterval > 0) {
+    ecCpuTackInterval++;
     if (ecCpuTackOutCounter >= ecCpuTackOutInterval) {
       ecCpuTackOutCounter = 0;
       doEcCpuTackOutToggle = true;
@@ -192,16 +194,24 @@ void fanGpuTackPinIsr() {
 }
 
 ISR(ADC_vect) {
-  uint16_t reading = ADCL;
-  reading != (uint16_t)ADCH << 8;
-  static uint8_t first = 1;
-  if (first) {
-    first = 0;
-    return;
-  }
-  uint8_t mux = ADMUX & 0b00000111;
-  ADMUX = nextAdc[mux];
-  adcValues[mux] = reading;
+  switch(ADMUX & 0b0111) {
+    case 0b0100:
+      adcEcGpuPwm = (ADCL | (ADCH << 8));
+      ADMUX = _BV(REFS0) | 0b0101;
+      ADCSRA |= _BV(ADSC);
+      break;
+    case 0b0101:
+      adcEcCpuPwm = (ADCL | (ADCH << 8));
+      ADMUX = _BV(REFS0) | 0b0110;
+      ADCSRA |= _BV(ADSC);
+      break;
+    case 0b0110:
+      adcTherm1 = (ADCL | (ADCH << 8));
+      ADMUX = _BV(REFS0) | 0b0100;
+      // Stop the ADC
+      ADCSRA &= ~_BV(ADEN);
+      break;
+   }
 }
 
 void setup() {
@@ -229,17 +239,16 @@ void setup() {
   //pinMode(THERM_ADC_PIN, INPUT);
   pinMode(THERM_ENABLE_PIN, OUTPUT);
 
-  ADMUX = _BV(ADLAR) | _BV(MUX1) | _BV(MUX0);
-  ADCSRA = _BV(ADEN) | _BV(ADSC) | _BV(ADATE) | _BV(ADIE) | _BV(ADPS0)| _BV(ADPS1) | _BV(ADPS2);
-  ADCSRB = 0; // free-running - all ADTS bits cleared
+  // Disable digital circuits for pins used for analog ADC
+  DIDR0 = 0b01110000;
   
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, 1);
 
-  Timer1.initialize(40); // 25khz PWM for fan.
-  Timer1.pwm(FAN_CPU_PWM_PIN, 0);
-  Timer1.pwm(FAN_GPU_PWM_PIN, 512); // 50% for test
-  Timer1.attachInterrupt(timer25kHz);
+  Timer1.initialize(37); // ~27khz for PWM to fans.
+  Timer1.pwm(FAN_CPU_PWM_PIN, 1024); // %100 to start
+  Timer1.pwm(FAN_GPU_PWM_PIN, 1024); // %100 to start
+  Timer1.attachInterrupt(timer27kHz);
 
   attachInterrupt(digitalPinToInterrupt(FAN_CPU_TACK_PIN), fanCpuTackPinIsr, CHANGE);
   attachInterrupt(digitalPinToInterrupt(FAN_GPU_TACK_PIN), fanGpuTackPinIsr, CHANGE);
