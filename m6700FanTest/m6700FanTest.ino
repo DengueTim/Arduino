@@ -143,12 +143,18 @@ void timer25kHz() {
   // Counts from 0 to ecTackOutInterval
   static uint16_t ecCpuTackCounter = 0;
   static uint16_t ecGpuTackCounter = 0;
-
   if (ecCpuTackInterval > 0) {
     ecCpuTackInterval++;
     if (ecCpuTackOutCounter >= ecCpuTackOutInterval) {
       ecCpuTackOutCounter = 0;
       doEcCpuTackOutToggle = true;
+    } 
+  }
+  if (ecGpuTackInterval > 0) {
+    ecGpuTackInterval++;
+    if (ecGpuTackCounter >= ecGpuTackInterval) {
+      ecGpuTackCounter = 0;
+      doEcGpuTackToggle = true;
     } 
   }
 }
@@ -164,8 +170,8 @@ void fanCpuTackPinIsr() {
   }
   lastMicros = currentMicros;
   
-  if (ecCpuTackOutInterval == TACK_PASS_THROUGH) {
-    doEcCpuTackOutToggle = true;
+  if (ecCpuTackInterval == TACK_PASS_THROUGH) {
+    doEcCpuTackToggle = true;
   }
 }
 
@@ -180,8 +186,8 @@ void fanGpuTackPinIsr() {
   }
   lastMicros = currentMicros;
   
-  if (ecCpuTackOutInterval == TACK_PASS_THROUGH) {
-    doEcCpuTackOutToggle = true;
+  if (ecGpuTackInterval == TACK_PASS_THROUGH) {
+    doEcGpuTackOutToggle = true;
   }
 }
 
@@ -237,10 +243,10 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, 1);
 
-  Timer1.initialize(37); // ~27khz for PWM to fans.
+  Timer1.initialize(40); // 25khz for PWM to fans.
   Timer1.pwm(FAN_CPU_PWM_PIN, 1024); // %100 to start
   Timer1.pwm(FAN_GPU_PWM_PIN, 1024); // %100 to start
-  Timer1.attachInterrupt(timer27kHz);
+  Timer1.attachInterrupt(timer25kHz);
 
   attachInterrupt(digitalPinToInterrupt(FAN_CPU_TACK_PIN), fanCpuTackPinIsr, CHANGE);
   attachInterrupt(digitalPinToInterrupt(FAN_GPU_TACK_PIN), fanGpuTackPinIsr, CHANGE);
@@ -288,7 +294,5 @@ void loop() {
         int pwmDuty = (c - '0') * 128;
         Timer1.pwm(FAN_GPU_PWM_PIN, pwmDuty);
     }
-  } else {
-    delay(1);
   }
 }
