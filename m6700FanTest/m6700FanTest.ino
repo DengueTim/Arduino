@@ -23,37 +23,29 @@
 
 #define LED_PIN               13
 
-#define TACK_PASS_THROUGH     -1
-#define TACK_STOP             0
-
-#define TACK_MIN_25K          93
-#define TACK_MAX_25K          375
+#define EC_TACK_INTERVAL_STOP   0
+#define EC_TACK_START_INTERVAL  15000
 
 #define PWM_MAX               1024
 #define PWM_MIN_CUTOFF        256
 
 #define ANALOG_MAX            1024
 
-volatile uint16_t adcEcGpuPwm = 0;
-volatile uint16_t adcEcCpuPwm = 0;
-volatile uint16_t adcTherm1 = 0;
+/* 
+Fake the tack output to the EC for CPU and GPU
+The target values are set depending on the EC PWM inputs
+The current values incrementally move towards the target values.
 
-volatile bool fanCpuUsPerRevValid = false;
-volatile uint32_t fanCpuUsPerRev = UINT32_MAX; // Stopped
-
-volatile bool fanGpuUsPerRevValid = false;
-volatile uint32_t fanGpuUsPerRev = UINT32_MAX; // Stopped
-
-// Desired time between transitions of tack to EC in 27,0000th of a second.
-// Working values are 93(~4000rpm 100%) to 375(~1000rpm 25%)
-// 0 Stopped
-// -1 copy tack value from real fan every millisecond  
-volatile uint16_t ecCpuTackInterval = TACK_PASS_THROUGH;
-volatile uint16_t ecGpuTackInterval = TACK_PASS_THROUGH;
+Interval between transitions of tack to EC in microseconds.  4 transitions per rotation.
+Working values are 
+  4000rpm 100% ~ 3800us 
+  1000rpm 25% ~ 15000us
+  Stopped -> 0 
+*/
+volatile uint16_t ecCpuTackTargetInterval = EC_TACK_INTERVAL_STOP;
+volatile uint16_t ecGpuTackTargetInterval = EC_TACK_INTERVAL_STOP;
 
 volatile bool doEveryDecasecond = false;
-volatile bool doEcCpuTackOutToggle = false;
-volatile bool doEcGpuTackOutToggle = false;
 
 void everyDecasecond() {
   uint32_t localFanCpuUsPerRev;
@@ -139,13 +131,13 @@ void everyDecasecond() {
   Serial.println();
 }
 
-void timer27kHz() {
-  // Counts from 0 to 26999
-  static uint16_t timer27kHzCounter = 0;
-  timer27kHzCounter++;
-  if (timer27kHzCounter >= 2700) {
-    timer27kHzCounter = 0;
-    doEveryDecasecond = true;
+void timer25kHz() {
+  // Counts from 0 to 24999
+  static uint16_t timer25kHzCounter = 0;
+
+  timer25kHzCounter++;
+  if (timer25kHzCounter >= 25000) {
+    timer25kHzCounter = 0;
   }
   
   // Counts from 0 to ecTackOutInterval
@@ -253,16 +245,43 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(FAN_CPU_TACK_PIN), fanCpuTackPinIsr, CHANGE);
   attachInterrupt(digitalPinToInterrupt(FAN_GPU_TACK_PIN), fanGpuTackPinIsr, CHANGE);
 }
- 
+
 void loop() {
   static bool ecCpuTackOutValue = 0;
+  static bool ecGpuTackOutValue = 0;
+  static uint16_t ecCpuTackCurrentInterval = EC_TACK_INTERVAL_STOP;
+  static uint16_t ecGpuTackCurrentInterval = EC_TACK_INTERVAL_STOP;
+  static uint32_t ecCpuTackLastTransition = 0;
+  static uint32_t ecGpuTackLastTransition = 0;
+
+  uint32_t t = micros();
+  
+  if (ecCpuTackCurrentInterval) {
+    uint32_t nextTransition = ecCpuTackLastTransition + ecCpuTackCurrentInterval;
+    uint32_t timeToNextTransition = nextTransition - t;
+
+    
+    if (nextTransition < ecCpuTackLastTransition) {
+      // Overflow.
+      
+    }
+    if (t >= nextTransition) {
+      ecCpuTackLastTransition = nextTransition;
+      ecCpuTackOutValue = !ecCpuTackOutValue;
+      digitalWrite(EC_CPU_TACK_PIN, ecCpuTackOutValue);
+    }
+    
+  } else if (ecCpuTackTargetInterval) {
+    // Start up tack
+    ecCpuTackCurrentInterval = EC_TACK_START_INTERVAL;
+    ecCpuTackLastTransition = t;
+    ecCpuTackOutValue = !ecCpuTackOutValue;
+    digitalWrite(EC_CPU_TACK_PIN, ecCpuTackOutValue);
+  }
+
   if (doEveryDecasecond) {
     doEveryDecasecond = false;
     everyDecasecond();
-  } else if (doEcCpuTackOutToggle) {
-    doEcCpuTackOutToggle = false;
-    ecCpuTackOutValue = !ecCpuTackOutValue;
-    digitalWrite(EC_CPU_TACK_PIN, ecCpuTackOutValue);
   } else if (Serial.available()) {
     int c = Serial.read();
     if (c >= '0' && c <= '8') {
