@@ -19,7 +19,7 @@
 
 #define THERM_ENABLE_PIN      11
 #define THERM_ADC             6 // A6
-#define THERM_R_OHMS         4700
+#define THERM_R_OHMS          4700
 
 #define LED_PIN               13
 
@@ -80,6 +80,8 @@ void fanGpuTackPinIsr() {
 void setup() {
   Serial.begin(115200);
   Serial.println("M6700 4 Wire Fan Controller Hack v0.1");
+  Serial.println("EC CPU\tEC GPU\tFromC\tC");
+ 
   
   pinMode(FAN_CPU_TACK_PIN, INPUT_PULLUP);
   pinMode(FAN_CPU_PWM_PIN, OUTPUT);
@@ -95,7 +97,6 @@ void setup() {
   pinMode(EC_GPU_TACK_PIN, OUTPUT);
   digitalWrite(EC_GPU_TACK_PIN, 0);
 
-  //pinMode(THERM_ADC_PIN, INPUT);
   pinMode(THERM_ENABLE_PIN, OUTPUT);
   digitalWrite(THERM_ENABLE_PIN, 0);
     
@@ -106,8 +107,8 @@ void setup() {
   DIDR0 = 0b01110110;
 
   Timer1.initialize(37); // 27.027khz for PWM to fans.
-  Timer1.pwm(FAN_CPU_PWM_PIN, 1024); // %100 to start
-  Timer1.pwm(FAN_GPU_PWM_PIN, 1024); // %100 to start
+  Timer1.pwm(FAN_CPU_PWM_PIN, 0);
+  Timer1.pwm(FAN_GPU_PWM_PIN, 0);
   Timer1.attachInterrupt(timer27kHz);
 
   attachInterrupt(digitalPinToInterrupt(FAN_CPU_TACK_PIN), fanCpuTackPinIsr, CHANGE);
@@ -120,20 +121,20 @@ void setup() {
 #define EC_TACK_ACCEL_RATE 120
 #define EC_TACK_FREE_RATE 30
 
-void updateEcTackInterval(uint16_t ecPwmAdc, uint16_t *currentInterval) {
+void updateEcTackInterval(uint16_t ecPwmAdc, uint32_t *currentInterval) {
   if (ecPwmAdc >= 256) {
     if (*currentInterval == 0) {
       // Start
       *currentInterval = EC_TACK_START_INTERVAL;
     } else {
-      uint16_t targetInterval = EC_TACK_START_INTERVAL - (ecPwmAdc - 256) * 16;     
+      uint32_t targetInterval = EC_TACK_START_INTERVAL - (ecPwmAdc - 256) * 16;     
       if (targetInterval < *currentInterval) {
         // Speed up
-        uint16_t di = *currentInterval - targetInterval;
+        uint32_t di = *currentInterval - targetInterval;
         *currentInterval -= (di > EC_TACK_ACCEL_RATE ? EC_TACK_ACCEL_RATE : di);  
       } else if (targetInterval > *currentInterval) {
         // Slow down
-        uint16_t di = targetInterval - *currentInterval;
+        uint32_t di = targetInterval - *currentInterval;
         *currentInterval += (di > EC_TACK_ACCEL_RATE ? EC_TACK_ACCEL_RATE : di);
       }
     }
@@ -146,7 +147,7 @@ void updateEcTackInterval(uint16_t ecPwmAdc, uint16_t *currentInterval) {
   }
 }
 
-uint16_t centegrateFromThermAdc(uint32_t thermAdc) {
+float centegrateFromThermAdc(uint32_t thermAdc) {
   uint32_t thermOhms = (THERM_R_OHMS * thermAdc) / (ANALOG_MAX - thermAdc); // Rt / (R + Rt)
   /* 
    *  Kohms   temp C    ADC
@@ -157,13 +158,13 @@ uint16_t centegrateFromThermAdc(uint32_t thermAdc) {
    *  
    * Function from logorithmic regression (* 64).  
    */
-  return (21804 - (uint16_t)(2200 * (float)log(thermOhms))) >> 6;
+  return 340.7 - 34.38 * (float)log(thermOhms);
 }
 
-void updateFanSpeeds(uint8_t tempC) {
+void updateFanSpeeds(float tempC) {
   // Calulate rate from temp. Linear. 40C -> 25%, 70C -> 100%
   //uint16_t rateFromTemp = (uint16_t)(tempC * 25.6) - 768;
-  int16_t signedRateFromTemp = (int16_t)(tempC * 102.4) - 2560;
+  int16_t signedRateFromTemp = (uint16_t)(tempC * 102.4) - 2560;
   uint16_t rateFromTemp;
   if (signedRateFromTemp < 256) {
     rateFromTemp = 0;
@@ -195,12 +196,17 @@ void updateFanSpeeds(uint8_t tempC) {
   if (counter++ >= 50) {
     counter = 0;
     Serial.print(adcEcCpuPwm, DEC);
-    Serial.print(':');
-    Serial.print(adcEcGpuPwm, DEC);
+    Serial.print(cpuRateOverride ? '-' : '+');
     Serial.print('\t');
-    Serial.print(tempC, DEC);
-    Serial.print(':');
+    
+    Serial.print(adcEcGpuPwm, DEC);
+    Serial.print(gpuRateOverride ? '-' : '+');
+    Serial.print("\t");
+
     Serial.print(rateFromTemp, DEC);
+    Serial.print('\t');
+    
+    Serial.print(tempC, 1);
     Serial.println(); 
   }
 }
@@ -218,11 +224,11 @@ void loop() {
     16088 923rpm ~ 23%
     Stopped -> 0 
   */
-  static uint16_t ecCpuTackInterval = EC_TACK_INTERVAL_STOP;
+  static uint32_t ecCpuTackInterval = EC_TACK_INTERVAL_STOP;
   static uint32_t ecCpuTackLast = t;
   static bool ecCpuTackOutValue = 0;
 
-  static uint16_t ecGpuTackInterval = EC_TACK_INTERVAL_STOP;
+  static uint32_t ecGpuTackInterval = EC_TACK_INTERVAL_STOP;
   static uint32_t ecGpuTackLast = t;
   static bool ecGpuTackOutValue = 0;
 
@@ -230,22 +236,26 @@ void loop() {
     adcSweepComplete = false;
     updateEcTackInterval(adcEcCpuPwm, &ecCpuTackInterval);
     updateEcTackInterval(adcEcGpuPwm, &ecGpuTackInterval);
-    uint8_t gpuTempC = centegrateFromThermAdc(adcTherm1);
+    float gpuTempC = centegrateFromThermAdc(adcTherm1);
     updateFanSpeeds(gpuTempC);
   }
 
-  if (ecCpuTackInterval != EC_TACK_INTERVAL_STOP && (t - ecCpuTackLast > ecCpuTackInterval)) {
-    ecCpuTackLast += ecCpuTackInterval;
-    ecCpuTackOutValue = !ecCpuTackOutValue;
-    digitalWrite(EC_CPU_TACK_PIN, ecCpuTackOutValue);
+  if (ecCpuTackInterval != EC_TACK_INTERVAL_STOP) {
+    if (t - ecCpuTackLast > ecCpuTackInterval) {
+      ecCpuTackLast += ecCpuTackInterval;
+      ecCpuTackOutValue = !ecCpuTackOutValue;
+      digitalWrite(EC_CPU_TACK_PIN, ecCpuTackOutValue);
+      }
   } else {
     ecCpuTackLast = t;
   }
   
-  if (ecGpuTackInterval != EC_TACK_INTERVAL_STOP && (t - ecGpuTackLast > ecGpuTackInterval)) {
-    ecGpuTackLast += ecGpuTackInterval;
-    ecGpuTackOutValue = !ecGpuTackOutValue;
-    digitalWrite(EC_GPU_TACK_PIN, ecGpuTackOutValue);
+  if (ecGpuTackInterval != EC_TACK_INTERVAL_STOP) {
+    if (t - ecGpuTackLast > ecGpuTackInterval) {
+      ecGpuTackLast += ecGpuTackInterval;
+      ecGpuTackOutValue = !ecGpuTackOutValue;
+      digitalWrite(EC_GPU_TACK_PIN, ecGpuTackOutValue);
+    }
   } else {
     ecGpuTackLast = t;
   }
