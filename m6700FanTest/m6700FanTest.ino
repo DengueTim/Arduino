@@ -28,10 +28,15 @@
 
 #define ANALOG_MAX            1024
 
+#define EC_TACK_INTERVAL_STOP   0
+
 volatile uint16_t adcEcGpuPwm = 0;
 volatile uint16_t adcEcCpuPwm = 0;
 volatile uint16_t adcTherm1 = 0;
 volatile boolean adcSweepComplete = false;
+
+volatile uint32_t ecCpuTackInterval = EC_TACK_INTERVAL_STOP;
+volatile uint32_t ecGpuTackInterval = EC_TACK_INTERVAL_STOP;
 
 void timer27kHz() {
   static uint16_t counter = 0;
@@ -43,6 +48,44 @@ void timer27kHz() {
     ADMUX = _BV(REFS0) | 0b0100;
     ADCSRA = _BV(ADEN) | _BV(ADSC) | _BV(ADIE) | _BV(ADPS0)| _BV(ADPS1) | _BV(ADPS2);
   } 
+
+  uint32_t t = micros();
+
+  /* 
+  Fake the tack output to the EC for CPU and GPU fans
+  The values are set depending on the EC PWM inputs updated after every ADC sweep @ ~100hz
+
+  Interval between transitions of tack to EC in microseconds.  4 transitions per rotation.
+  Working values are 
+    3700 4054rpm 100% 
+    16088 923rpm ~ 23%
+    Stopped -> 0 
+  */
+  static uint32_t ecCpuTackLast = t;
+  static bool ecCpuTackOutValue = 0;
+
+  static uint32_t ecGpuTackLast = t;
+  static bool ecGpuTackOutValue = 0;
+
+  if (ecCpuTackInterval != EC_TACK_INTERVAL_STOP) {
+    if (t - ecCpuTackLast > ecCpuTackInterval) {
+      ecCpuTackLast += ecCpuTackInterval;
+      ecCpuTackOutValue = !ecCpuTackOutValue;
+      digitalWrite(EC_CPU_TACK_PIN, ecCpuTackOutValue);
+      }
+  } else {
+    ecCpuTackLast = t;
+  }
+  
+  if (ecGpuTackInterval != EC_TACK_INTERVAL_STOP) {
+    if (t - ecGpuTackLast > ecGpuTackInterval) {
+      ecGpuTackLast += ecGpuTackInterval;
+      ecGpuTackOutValue = !ecGpuTackOutValue;
+      digitalWrite(EC_GPU_TACK_PIN, ecGpuTackOutValue);
+    }
+  } else {
+    ecGpuTackLast = t;
+  }
 }
 
 ISR(ADC_vect) {
@@ -115,13 +158,19 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(FAN_GPU_TACK_PIN), fanGpuTackPinIsr, CHANGE);
 }
 
-#define EC_TACK_INTERVAL_STOP   0
-#define EC_TACK_START_INTERVAL  16088
 
-#define EC_TACK_ACCEL_RATE 120
-#define EC_TACK_FREE_RATE 30
+#define EC_TACK_START_INTERVAL  16088
+#define EC_TACK_RATE 80
+#define EC_TACK_OFF_RATE 30
 
 void updateEcTackInterval(uint16_t ecPwmAdc, uint32_t *currentInterval) {
+  /*
+   * From 0% to 100% about 2 second.
+   * From 100% to off(0) abount 6 seconds.
+   * Changing between non zero duties goes at 0-100 rate.
+   * 
+   * This method is call at about 100Hz
+   */
   if (ecPwmAdc >= 256) {
     if (*currentInterval == 0) {
       // Start
@@ -131,16 +180,16 @@ void updateEcTackInterval(uint16_t ecPwmAdc, uint32_t *currentInterval) {
       if (targetInterval < *currentInterval) {
         // Speed up
         uint32_t di = *currentInterval - targetInterval;
-        *currentInterval -= (di > EC_TACK_ACCEL_RATE ? EC_TACK_ACCEL_RATE : di);  
+        *currentInterval -= (di > EC_TACK_RATE ? EC_TACK_RATE : di);  
       } else if (targetInterval > *currentInterval) {
         // Slow down
         uint32_t di = targetInterval - *currentInterval;
-        *currentInterval += (di > EC_TACK_ACCEL_RATE ? EC_TACK_ACCEL_RATE : di);
+        *currentInterval += (di > EC_TACK_RATE ? EC_TACK_RATE : di);
       }
     }
   } else if (*currentInterval) {
     // Stop
-    *currentInterval += EC_TACK_FREE_RATE;
+    *currentInterval += EC_TACK_OFF_RATE;
     if (*currentInterval > EC_TACK_START_INTERVAL) {
       *currentInterval = EC_TACK_INTERVAL_STOP;
     }
@@ -212,52 +261,12 @@ void updateFanSpeeds(float tempC) {
 }
 
 void loop() {
-  uint32_t t = micros();
-
-  /* 
-  Fake the tack output to the EC for CPU and GPU fans
-  The values are set depending on the EC PWM inputs updated after every ADC sweep @ ~100hz
-
-  Interval between transitions of tack to EC in microseconds.  4 transitions per rotation.
-  Working values are 
-    3700 4054rpm 100% 
-    16088 923rpm ~ 23%
-    Stopped -> 0 
-  */
-  static uint32_t ecCpuTackInterval = EC_TACK_INTERVAL_STOP;
-  static uint32_t ecCpuTackLast = t;
-  static bool ecCpuTackOutValue = 0;
-
-  static uint32_t ecGpuTackInterval = EC_TACK_INTERVAL_STOP;
-  static uint32_t ecGpuTackLast = t;
-  static bool ecGpuTackOutValue = 0;
-
   if (adcSweepComplete) {
     adcSweepComplete = false;
     updateEcTackInterval(adcEcCpuPwm, &ecCpuTackInterval);
     updateEcTackInterval(adcEcGpuPwm, &ecGpuTackInterval);
     float gpuTempC = centegrateFromThermAdc(adcTherm1);
     updateFanSpeeds(gpuTempC);
-  }
-
-  if (ecCpuTackInterval != EC_TACK_INTERVAL_STOP) {
-    if (t - ecCpuTackLast > ecCpuTackInterval) {
-      ecCpuTackLast += ecCpuTackInterval;
-      ecCpuTackOutValue = !ecCpuTackOutValue;
-      digitalWrite(EC_CPU_TACK_PIN, ecCpuTackOutValue);
-      }
-  } else {
-    ecCpuTackLast = t;
-  }
-  
-  if (ecGpuTackInterval != EC_TACK_INTERVAL_STOP) {
-    if (t - ecGpuTackLast > ecGpuTackInterval) {
-      ecGpuTackLast += ecGpuTackInterval;
-      ecGpuTackOutValue = !ecGpuTackOutValue;
-      digitalWrite(EC_GPU_TACK_PIN, ecGpuTackOutValue);
-    }
-  } else {
-    ecGpuTackLast = t;
   }
 
   if (Serial.available()) {
